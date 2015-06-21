@@ -1,0 +1,228 @@
+---
+title: "Machine Learning Project"
+author: "Jamin Ragle"
+date: "June 18, 2015"
+output: html_document
+---
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Load some libraries
+library(knitr)
+library(lattice)
+library(ggplot2)
+library(caret)
+library(survival)
+library(splines)
+library(parallel)
+library(plyr)
+library(gbm)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+### Summary
+
+It is more common for people to use devices such as Jawbone Up, Nike FuelBand, and Fitbit making it now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+The subjects we are looking at were asked to perform barbell lifts correctly and incorrectly in 5 different ways. In this project, we will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to train a model and then predict the outcome of a test set of data with a relatively high ammount of accuracy. The goal is to predict the manner in which the subjects did the exercise. (A,B,C,D or E) This is the `classe` variable in the training set. 
+
+---
+
+#### Data and exploration for building a prediction model
+
+  * The training data for this project are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+  * The test data are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+  * See **Citations** at the end of the document for data source details.
+
+```{r read-data,results='asis',echo=FALSE,tidy=TRUE}
+setwd("~/sandbox/predmachlearn-015/")
+training <- read.csv("data/pml-training.csv")
+testing <- read.csv("data/pml-testing.csv")
+```
+
+The raw `training` data are pretty large (`r dim(training)`) and the events are reasonably distributed with more in the `A` catagory. 
+
+```{r,echo=FALSE,tidy=TRUE}
+summary(training$classe)
+```
+
+Using the `nearZeroVar()` function to quickly see if there are covariates we can safely throw away from the set, I noticed that there were quite a few statistical/calculated columns in the data. They typically had a very low `nzv` so I decided to manually throw them all out, keeping only the collected sensor data. I also decided to throw away the subject names, and raw timing data, sticking with my premise that I only wanted to build my models with the raw sensor data.
+
+```{r,echo=FALSE}
+# Determining what to throw away
+nsv <- nearZeroVar(training,saveMetrics=TRUE)
+#head(nsv,n=5)
+# There were many near zero variance variables related to statitical characteristics, so I decided to throw those away.
+```
+
+
+```{r mask-data,echo=FALSE,dependson='read-data'}
+# Mask out unnecessary data
+rawDataMask <- c(6:11,37:49,60:68,84:86,113:124,151:160)
+statDataMask <- c(12:36,50:59,69:83,87:112,125:150,160)
+training <- training[rawDataMask]
+testing <- testing[rawDataMask]
+```
+
+My trimmed `training` dataset size is now **`r dim(training)[2]`** variables down from **160**, with the remaining covariates focusing on the raw sensor data. See the **Appendix** at the end of the report for the actual column names.
+
+---
+
+### Cross-validation
+
+```{r sample-data,echo=FALSE,warning=FALSE,dependson='mask-data'}
+# cross validation
+set.seed(12345)
+sample_size = nrow(training)
+#rsamp1 = sample(1:sample_size,sample_size/2,replace=FALSE)
+rsamp1 <- createDataPartition(y=training$classe, p=0.5, list=FALSE)
+# Change back to p=0.5 for final draft!
+
+# break up in 2 parts, using random subsampling
+t1 = training[rsamp1,]
+t2 = training[-rsamp1,]
+```
+
+Preparing the `training` data for cross-validation, I decided to perform **random subsampling**, without any replacement. After performing the random subsampling, randomly breaking up the `training` sample in two parts `t1` and `t2`, the observations are divided evenly with **`r dim(t1)[1]`** observations. I decided half the total and a random sample across the entire training set is enough to train a test model.
+
+```{r,eval=FALSE}
+rsamp1 <- createDataPartition(y=training$classe, p=0.5, list=FALSE)
+t1 = training[rsamp1,]
+t2 = training[-rsamp1,]
+```
+
+#### Training Generalized Boost Method (GBM)
+
+I decided to use the **Generalized Boost Method** to train the data first using `t1` as the `training` set and `t2` as the `testing` set to test the accuracy of the method and model. All **53** remaining sensor data were used in the training to create `GBMmodel1`.
+
+```{r gbm-data,echo=FALSE,warning=FALSE,message=FALSE,results='hide',dependson='sample-data'}
+
+# Generalized Boost Method (GBM) ~98% accuracy
+GBMmodel1 <- train(classe~.,method="gbm",data=t1) # ~20min, 14.6Mb
+#GBMmodel2 <- train(classe~.,method="gbm",data=t2) # ~20min, 14.6Mb
+```
+
+```{r,echo=TRUE,eval=FALSE}
+# Generalized Boost Method (GBM) ~98% accuracy
+GBMmodel1 <- train(classe~.,method="gbm",data=t1) # ~20min, 14.6Mb
+GBMmodel2 <- train(classe~.,method="gbm",data=t2) # ~20min, 14.6Mb
+```
+
+Here I also generate a model, `GBMmodel2`, on the testing subsample to test if I can predict the training subsample outcomes with similar accuracy. Run times where about **20 minutes** and taking almost **15Mb** in memory for each model.
+
+#### Summary of GBM model characteristics
+Here we explore, the results of building our **GBM** model.
+```{r gbm-summary,echo=FALSE,warning=FALSE,dependson='gbm-data'}
+# Graph and output
+head(summary(GBMmodel1))
+```
+This is a trunkated list as there are more covariates than we want to display here. The plot does give indication of the total number and relative importance on predicting the outcomes. As you can see, the **Relative influence** order of the covariates in the model, `roll_belt` and `num_window` being the most significant relative influence in this model.
+
+#### Predicting the outcomes and measuring accuracy
+Testing the generated **GBM** model, we predict the outcomes using the `t2` data. 
+```{r,eval=FALSE}
+# Predict the outcome and test the accuracy
+gbm_p1 <- predict(GBMmodel1,t2)
+confusionMatrix(t2$classe,gbm_p1) # 98.7%
+```
+
+```{r gbm-pred,echo=FALSE,warning=FALSE,dependson='gbm-data'}
+# Predict the outcome and test the accuracy
+gbm_p1 <- predict(GBMmodel1,t2)
+confusionMatrix(t2$classe,gbm_p1) # 98.37%
+
+# Look at the other model generated to see if the prediction is similar
+#gbm_p2 <- predict(GBMmodel2,t1)
+#confusionMatrix(t1$classe,gbm_p2) # 98.57%
+```
+
+The confusion matrix shows quite a good accuracy for the **GBM** model being around **98.7%**. The **out of sample error** rate being very low. 
+
+
+```{r,eval=FALSE}
+# Look at the other model generated to see if the prediction is similar
+gbm_p2 <- predict(GBMmodel2,t1)
+confusionMatrix(t1$classe,gbm_p2) # 98.57%
+```
+
+Similarly the reverse model has nearly the same `accuracy` of **98.57%**. (Not including the `confusionMatrix()` output here to keep the report less cluttered.)
+
+#### Training a Random Forests model
+
+I also created **Random Forest (RF)** models similarly, planning to compare two models/methods/techniques.
+
+```{r rf-data,echo=TRUE,warning=FALSE,message=FALSE,dependson='sample-data',eval=FALSE}
+library(randomForest)
+RFmodel1 <- train(classe~.,method="rf",data=t1,prox=TRUE) # ~???min, 754.8Mb
+RFmodel2 <- train(classe~.,method="rf",data=t2,prox=TRUE) # ~???min, 754.8Mb
+```
+
+Amazingly, I found that the **RF** models were even **more accurate** than the **CBM** method, but the run time was **very S L O W** on our samples. The resources needed where impressive as well. You can see from my comments here that each model was taking up to **700Mb+** in memory each, and took an entire night to run.
+
+```{r rf-pred,echo=TRUE,dependson='rf-data',eval=FALSE}
+rf_p1 <- predict(RFmodel1,t2)
+rf_p2 <- predict(RFmodel2,t1)
+confusionMatrix(t2$classe,rf_p1) # 99.65% accuracy
+confusionMatrix(t1$classe,rf_p2) # 99.53% accuracy
+```
+
+In my testing I found that the models were upwards of **99% accurate**, but unfortunately due to the runtime and resources I could not continue on this path to compare two competing methods. 
+
+---
+
+### Conclusions
+
+I ended up using and sticking with **Generalized Boosting Method (GBM)** for my final prediction model, even though it had a lower accuracy than **Random Forests (RF)** method, particularly because of the time and resources needed for **RF**. Clearly if only taking into account the need for higher **accuracy**, Random Forests would be the method of choice, but given the time constraints for writing this report (rebuilding the model often while using `knitr`), the real winner is the **Generalized Boosting Method.**
+
+```{r final-model,echo=TRUE,eval=FALSE}
+# full model building
+GBMmodel <- train(classe~.,method="gbm",data=training)
+answers <- predict(GBMmodel,testing)
+```
+
+The `testing` set when generated and turned in using machine grading method on coursera.org, reported a 100% correct rate. I'm happy with the outcomes of this model, but given more time a proper comparison between the two models taking into account of resources and time would be interesting.
+
+---
+
+
+### Appendix
+
+---
+#### Used Training column names
+
+Following data columns where used in `training`, the rest were thrown out per suggestions when using `nearZeroVar()`:
+
+
+`r colnames(training)`
+
+
+---
+
+#### Citations
+Human Activity Recognition(**HAR**) data provided by:
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+
+**This dataset is licensed under the Creative Commons license (CC BY-SA).**
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3dXznGbSz
+
+---
+
+#### Turn in answers code:
+
+```{r write-answers,echo=TRUE,dependson='final-model',eval=FALSE}
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+
+---
